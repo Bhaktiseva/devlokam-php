@@ -27,6 +27,25 @@ function user_prefill(string $field): string
     return $user[$field] ?? '';
 }
 
+function media_style(?string $imageUrl): string
+{
+    if (!$imageUrl) {
+        return '';
+    }
+
+    return ' style="background-image:url(\'' . h($imageUrl) . '\')"';
+}
+
+function media_classes(string $baseClass, ?string $theme, ?string $imageUrl): string
+{
+    $classes = [$baseClass, theme_class($theme)];
+    if ($imageUrl) {
+        $classes[] = 'has-image';
+    }
+
+    return implode(' ', $classes);
+}
+
 function render_app(array $route): void
 {
     $page = $route['page'];
@@ -44,10 +63,11 @@ function render_app(array $route): void
         'seva' => 'Sacred Seva',
         'calendar' => 'Seva Calendar',
         'profile' => 'Profile',
+        'order-status' => 'Order Status',
+        'payment' => 'Complete Payment',
         'signin' => 'Sign In',
         default => 'Page Not Found',
     };
-
     ?>
     <!DOCTYPE html>
     <html lang="en">
@@ -55,6 +75,8 @@ function render_app(array $route): void
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title><?= h($title) ?> | DevLokam</title>
+        <link rel="icon" type="image/png" href="<?= h(app_url('assets/logo.png')) ?>">
+        <link rel="apple-touch-icon" href="<?= h(app_url('assets/logo.png')) ?>">
         <link rel="stylesheet" href="<?= h(app_url('assets/css/app.css')) ?>">
     </head>
     <body>
@@ -103,6 +125,12 @@ function render_app(array $route): void
                 case 'profile':
                     render_profile();
                     break;
+                case 'order-status':
+                    render_order_status();
+                    break;
+                case 'payment':
+                    render_payment_page();
+                    break;
                 case 'signin':
                     render_signin();
                     break;
@@ -145,13 +173,22 @@ function render_header(string $page, ?array $user, int $cartCount): void
                 <span class="pill subtle-pill">English</span>
                 <a class="cart-pill" href="<?= h(app_url('cart')) ?>">Cart <strong><?= $cartCount ?></strong></a>
                 <?php if ($user): ?>
-                    <a class="pill" href="<?= h(app_url('profile')) ?>"><?= h($user['role'] === 'admin' ? 'Admin' : 'Profile') ?></a>
-                    <form method="post" action="<?= h(app_url()) ?>" class="inline-form">
-                        <input type="hidden" name="_token" value="<?= h(csrf_token()) ?>">
-                        <input type="hidden" name="action" value="logout">
-                        <input type="hidden" name="redirect" value="<?= h(app_url()) ?>">
-                        <button class="btn btn-outline small-btn" type="submit">Sign Out</button>
-                    </form>
+                    <details class="user-menu">
+                        <summary class="user-trigger">
+                            <span class="avatar-mini"><?= h(strtoupper(substr((string) $user['full_name'], 0, 1))) ?></span>
+                            <span><?= h($user['full_name']) ?></span>
+                        </summary>
+                        <div class="user-menu-panel">
+                            <a href="<?= h(app_url('profile')) ?>">Profile</a>
+                            <a href="<?= h(app_url('order-status')) ?>">Order Status</a>
+                            <form method="post" action="<?= h(app_url()) ?>" class="menu-form">
+                                <input type="hidden" name="_token" value="<?= h(csrf_token()) ?>">
+                                <input type="hidden" name="action" value="logout">
+                                <input type="hidden" name="redirect" value="<?= h(app_url()) ?>">
+                                <button type="submit">Log Out</button>
+                            </form>
+                        </div>
+                    </details>
                 <?php else: ?>
                     <a class="btn btn-primary small-btn" href="<?= h(app_url('signin')) ?>">Sign In</a>
                 <?php endif; ?>
@@ -168,7 +205,7 @@ function render_footer(): void
         <div class="container footer-grid">
             <div>
                 <h3>DevLokam</h3>
-                <p>Hostinger-ready PHP application for puja bookings, temple discovery, sacred seva, and spiritual commerce.</p>
+                <p>Hostinger-ready PHP application with MySQL, Razorpay integration, profile tools, and editable image URLs stored in the database.</p>
             </div>
             <div>
                 <h4>Quick Links</h4>
@@ -179,7 +216,7 @@ function render_footer(): void
             </div>
             <div>
                 <h4>Deployment Notes</h4>
-                <p>Import <code>database.sql</code> in phpMyAdmin, update <code>config.php</code>, and upload all files to <code>public_html</code>.</p>
+                <p>Upload the package to <code>public_html</code>, import <code>database.sql</code> for a fresh install or <code>database_upgrade.sql</code> for an existing database, then confirm your Hostinger DB host in <code>config.php</code>.</p>
             </div>
         </div>
     </footer>
@@ -190,7 +227,7 @@ function render_home(): void
 {
     $featuredPujas = featured_pujas(4);
     $temples = featured_temples(3);
-    $products = all_products(['category' => null]);
+    $products = all_products();
     $sevas = all_sevas();
     $heroPuja = $featuredPujas[1] ?? $featuredPujas[0] ?? null;
     ?>
@@ -198,21 +235,21 @@ function render_home(): void
         <div class="hero-copy">
             <span class="eyebrow">Sacred blessings from holy temples</span>
             <h1>Experience the Divine from Home</h1>
-            <p>Book personalized pujas and sacred seva at India&apos;s most revered temples. The full app is structured for Hostinger Business hosting and MySQL in phpMyAdmin.</p>
+            <p>Book personalized pujas, shop sacred products, and sponsor seva with a Hostinger-ready PHP stack backed by MySQL and Razorpay.</p>
             <div class="hero-actions">
                 <a class="btn btn-primary" href="<?= h(app_url('pujas')) ?>">Explore Pujas</a>
                 <a class="btn btn-outline" href="<?= h(app_url('services')) ?>">Sacred Seva</a>
             </div>
         </div>
-        <div class="hero-media <?= h(theme_class($heroPuja['image_theme'] ?? 'theme-marigold')) ?>">
-            <?php if ($heroPuja): ?>
+        <?php if ($heroPuja): ?>
+            <div class="<?= h(media_classes('hero-media', $heroPuja['image_theme'] ?? null, $heroPuja['image_url'] ?? null)) ?>"<?= media_style($heroPuja['image_url'] ?? null) ?>>
                 <div class="floating-card">
-                    <span class="muted-label">Seva of the Day</span>
+                    <span class="muted-label">Puja of the Day</span>
                     <strong><?= h($heroPuja['name']) ?></strong>
                     <a href="<?= h(app_url('puja/' . $heroPuja['slug'])) ?>">Book Now</a>
                 </div>
-            <?php endif; ?>
-        </div>
+            </div>
+        <?php endif; ?>
     </section>
 
     <section class="section-block">
@@ -226,9 +263,9 @@ function render_home(): void
         <div class="card-grid four-col">
             <?php foreach ($featuredPujas as $puja): ?>
                 <article class="card product-card">
-                    <div class="card-media <?= h(theme_class($puja['image_theme'])) ?>">
+                    <div class="<?= h(media_classes('card-media', $puja['image_theme'] ?? null, $puja['image_url'] ?? null)) ?>"<?= media_style($puja['image_url'] ?? null) ?>>
                         <span class="badge">Featured</span>
-                        <span class="discount-badge"><?= h($puja['discount_label']) ?></span>
+                        <span class="discount-badge"><?= h((string) $puja['discount_label']) ?></span>
                     </div>
                     <div class="card-body">
                         <p class="card-kicker"><?= h($puja['deity']) ?></p>
@@ -237,7 +274,7 @@ function render_home(): void
                         <p class="line-clamp-2"><?= h($puja['description']) ?></p>
                         <div class="meta-row">
                             <span><?= h($puja['duration_label']) ?></span>
-                            <span><?= number_format((int) $puja['devotees_count']) ?> devotees</span>
+                            <span><?= h(number_format((int) $puja['devotees_count'])) ?> devotees</span>
                         </div>
                         <div class="price-row">
                             <strong><?= h(money($puja['price'])) ?></strong>
@@ -260,7 +297,7 @@ function render_home(): void
         </div>
         <div class="card-grid three-col">
             <?php foreach ($temples as $temple): ?>
-                <a class="temple-card <?= h(theme_class($temple['image_theme'])) ?>" href="<?= h(app_url('temples?temple=' . urlencode($temple['slug']))) ?>">
+                <a class="<?= h(media_classes('temple-card', $temple['image_theme'] ?? null, $temple['image_url'] ?? null)) ?>" href="<?= h(app_url('temples?temple=' . urlencode($temple['slug']))) ?>"<?= media_style($temple['image_url'] ?? null) ?>>
                     <div class="temple-overlay">
                         <span class="eyebrow small-eyebrow"><?= h($temple['deity_primary']) ?></span>
                         <h3><?= h($temple['name']) ?></h3>
@@ -283,8 +320,9 @@ function render_home(): void
         <div class="card-grid four-col">
             <?php foreach (array_slice($sevas, 0, 4) as $seva): ?>
                 <article class="card seva-card">
-                    <div class="card-media <?= h(theme_class($seva['image_theme'])) ?>">
+                    <div class="<?= h(media_classes('card-media', $seva['image_theme'] ?? null, $seva['image_url'] ?? null)) ?>"<?= media_style($seva['image_url'] ?? null) ?>>
                         <span class="badge subtle-badge"><?= h($seva['place_group']) ?></span>
+                        <span class="discount-badge"><?= h((string) $seva['badge_label']) ?></span>
                     </div>
                     <div class="card-body">
                         <h3><?= h($seva['name']) ?></h3>
@@ -312,14 +350,12 @@ function render_home(): void
         <div class="card-grid four-col">
             <?php foreach (array_slice($products, 0, 4) as $product): ?>
                 <article class="card product-card">
-                    <div class="card-media <?= h(theme_class($product['image_theme'])) ?>">
-                        <span class="discount-badge">
-                            <?= h((string) round((1 - ((float) $product['price'] / max((float) $product['original_price'], 1))) * 100)) ?>% OFF
-                        </span>
+                    <div class="<?= h(media_classes('card-media', $product['image_theme'] ?? null, $product['image_url'] ?? null)) ?>"<?= media_style($product['image_url'] ?? null) ?>>
+                        <span class="discount-badge"><?= h((string) round((1 - ((float) $product['price'] / max((float) $product['original_price'], 1))) * 100)) ?>% OFF</span>
                     </div>
                     <div class="card-body">
                         <h3><?= h($product['name']) ?></h3>
-                        <p class="muted-text"><?= h($product['category_name']) ?></p>
+                        <p class="muted-text"><?= h((string) $product['category_name']) ?></p>
                         <div class="meta-row">
                             <span><?= h(number_format((float) $product['rating'], 1)) ?> rating</span>
                             <span><?= h((string) $product['reviews_count']) ?> reviews</span>
@@ -333,7 +369,7 @@ function render_home(): void
                             <input type="hidden" name="action" value="add-to-cart">
                             <input type="hidden" name="product_id" value="<?= (int) $product['id'] ?>">
                             <input type="hidden" name="redirect" value="<?= h(app_url('store')) ?>">
-                            <button class="btn btn-outline full-width" type="submit">Add to Cart</button>
+                            <button class="btn btn-primary full-width" type="submit">Add to Cart</button>
                         </form>
                     </div>
                 </article>
@@ -345,12 +381,9 @@ function render_home(): void
 
 function render_pujas(): void
 {
-    $selectedTemple = $_GET['temple'] ?? '';
-    $selectedDeity = $_GET['deity'] ?? '';
-    $pujas = all_pujas([
-        'temple' => is_string($selectedTemple) ? $selectedTemple : '',
-        'deity' => is_string($selectedDeity) ? $selectedDeity : '',
-    ]);
+    $selectedTemple = is_string($_GET['temple'] ?? null) ? $_GET['temple'] : '';
+    $selectedDeity = is_string($_GET['deity'] ?? null) ? $_GET['deity'] : '';
+    $pujas = all_pujas(['temple' => $selectedTemple, 'deity' => $selectedDeity]);
     $temples = all_temples();
     $deities = puja_deities();
     ?>
@@ -375,9 +408,9 @@ function render_pujas(): void
         <div class="card-grid four-col">
             <?php foreach ($pujas as $puja): ?>
                 <article class="card product-card">
-                    <div class="card-media <?= h(theme_class($puja['image_theme'])) ?>">
+                    <div class="<?= h(media_classes('card-media', $puja['image_theme'] ?? null, $puja['image_url'] ?? null)) ?>"<?= media_style($puja['image_url'] ?? null) ?>>
                         <span class="badge">Featured</span>
-                        <span class="discount-badge"><?= h($puja['discount_label']) ?></span>
+                        <span class="discount-badge"><?= h((string) $puja['discount_label']) ?></span>
                     </div>
                     <div class="card-body">
                         <p class="card-kicker"><?= h($puja['deity']) ?></p>
@@ -413,7 +446,7 @@ function render_puja_detail(?string $slug): void
     ?>
     <section class="detail-layout">
         <div class="detail-main">
-            <div class="detail-media <?= h(theme_class($puja['image_theme'])) ?>"></div>
+            <div class="<?= h(media_classes('detail-media', $puja['image_theme'] ?? null, $puja['image_url'] ?? null)) ?>"<?= media_style($puja['image_url'] ?? null) ?>></div>
             <p class="eyebrow small-eyebrow"><?= h($puja['deity']) ?></p>
             <h1 class="page-title left-title"><?= h($puja['name']) ?></h1>
             <p class="muted-text"><?= h($puja['temple_name']) ?>, <?= h($puja['city']) ?>, <?= h($puja['state']) ?></p>
@@ -440,13 +473,12 @@ function render_puja_detail(?string $slug): void
         <aside class="detail-sidebar">
             <div class="booking-panel">
                 <h2>Book This Puja</h2>
-                <p class="muted-text">Your Details</p>
+                <p class="muted-text">Pay securely via Razorpay</p>
                 <form method="post" action="<?= h(app_url()) ?>" class="stack-form">
                     <input type="hidden" name="_token" value="<?= h(csrf_token()) ?>">
                     <input type="hidden" name="action" value="book-puja">
                     <input type="hidden" name="puja_id" value="<?= (int) $puja['id'] ?>">
                     <input type="hidden" name="redirect" value="<?= h(app_url('puja/' . $puja['slug'])) ?>">
-
                     <input name="full_name" type="text" placeholder="Full Name" value="<?= h(user_prefill('full_name')) ?>" required>
                     <input name="email" type="email" placeholder="Email Address" value="<?= h(user_prefill('email')) ?>" required>
                     <input name="phone" type="text" placeholder="Phone Number" value="<?= h(user_prefill('phone')) ?>" required>
@@ -459,13 +491,12 @@ function render_puja_detail(?string $slug): void
                         <input name="state" type="text" placeholder="State" value="<?= h(user_prefill('state')) ?>" required>
                     </div>
                     <input name="pincode" type="text" placeholder="Pincode" value="<?= h(user_prefill('pincode')) ?>" required>
-
                     <div class="checkout-total">
                         <span>Total Amount</span>
                         <strong><?= h(money($puja['price'])) ?></strong>
                     </div>
-                    <button class="btn btn-primary full-width" type="submit">Pay Now</button>
-                    <p class="payment-note">Payment gateway placeholder: bookings are stored as pending until Razorpay or another gateway is connected.</p>
+                    <button class="btn btn-primary full-width" type="submit">Pay with Razorpay</button>
+                    <p class="payment-note">A Razorpay order is created on the server first, then payment is verified before the booking is marked paid.</p>
                 </form>
             </div>
         </aside>
@@ -475,21 +506,18 @@ function render_puja_detail(?string $slug): void
 
 function render_temples(): void
 {
-    $selectedState = $_GET['state'] ?? '';
-    $selectedSearch = $_GET['search'] ?? '';
-    $selectedTempleSlug = $_GET['temple'] ?? '';
-    $temples = all_temples([
-        'state' => is_string($selectedState) ? $selectedState : '',
-        'search' => is_string($selectedSearch) ? $selectedSearch : '',
-    ]);
+    $selectedState = is_string($_GET['state'] ?? null) ? $_GET['state'] : '';
+    $selectedSearch = is_string($_GET['search'] ?? null) ? $_GET['search'] : '';
+    $selectedTempleSlug = is_string($_GET['temple'] ?? null) ? $_GET['temple'] : '';
+    $temples = all_temples(['state' => $selectedState, 'search' => $selectedSearch]);
     $states = temple_states();
-    $modalTemple = is_string($selectedTempleSlug) && $selectedTempleSlug !== '' ? find_temple_by_slug($selectedTempleSlug) : null;
+    $modalTemple = $selectedTempleSlug !== '' ? find_temple_by_slug($selectedTempleSlug) : null;
     ?>
     <section class="section-block compact-top">
         <span class="eyebrow">Explore</span>
         <h1 class="page-title left-title">Sacred Temples of India</h1>
         <form class="filter-bar" method="get" action="<?= h(app_url('temples')) ?>">
-            <input type="text" name="search" value="<?= h((string) $selectedSearch) ?>" placeholder="Search temples...">
+            <input type="text" name="search" value="<?= h($selectedSearch) ?>" placeholder="Search temples...">
             <select name="state">
                 <option value="">Filter by state</option>
                 <?php foreach ($states as $state): ?>
@@ -500,7 +528,7 @@ function render_temples(): void
         </form>
         <div class="card-grid three-col">
             <?php foreach ($temples as $temple): ?>
-                <a class="temple-card temple-large <?= h(theme_class($temple['image_theme'])) ?>" href="<?= h(app_url('temples?temple=' . urlencode($temple['slug']))) ?>">
+                <a class="<?= h(media_classes('temple-card temple-large', $temple['image_theme'] ?? null, $temple['image_url'] ?? null)) ?>" href="<?= h(app_url('temples?temple=' . urlencode($temple['slug']))) ?>"<?= media_style($temple['image_url'] ?? null) ?>>
                     <div class="temple-overlay">
                         <span class="eyebrow small-eyebrow"><?= h($temple['deity_primary']) ?></span>
                         <h3><?= h($temple['name']) ?></h3>
@@ -516,23 +544,23 @@ function render_temples(): void
         <div class="modal-backdrop">
             <div class="modal-panel">
                 <a class="modal-close" href="<?= h(app_url('temples')) ?>">x</a>
-                <div class="modal-media <?= h(theme_class($modalTemple['image_theme'])) ?>"></div>
+                <div class="<?= h(media_classes('modal-media', $modalTemple['image_theme'] ?? null, $modalTemple['image_url'] ?? null)) ?>"<?= media_style($modalTemple['image_url'] ?? null) ?>></div>
                 <div class="modal-content">
-                    <p class="eyebrow small-eyebrow"><?= h($modalTemple['deity_primary']) ?> / <?= h($modalTemple['deity_secondary']) ?></p>
+                    <p class="eyebrow small-eyebrow"><?= h($modalTemple['deity_primary']) ?> / <?= h((string) $modalTemple['deity_secondary']) ?></p>
                     <h2><?= h($modalTemple['name']) ?></h2>
-                    <p class="muted-text"><?= h($modalTemple['city']) ?>, <?= h($modalTemple['state']) ?> | <?= h($modalTemple['opening_hours']) ?></p>
+                    <p class="muted-text"><?= h($modalTemple['city']) ?>, <?= h($modalTemple['state']) ?> | <?= h((string) $modalTemple['opening_hours']) ?></p>
                     <div class="info-box">
                         <h3>About</h3>
-                        <p><?= h($modalTemple['about_text']) ?></p>
+                        <p><?= h((string) $modalTemple['about_text']) ?></p>
                     </div>
                     <div class="info-box soft-box">
                         <h3>Significance</h3>
-                        <p><?= h($modalTemple['significance_text']) ?></p>
+                        <p><?= h((string) $modalTemple['significance_text']) ?></p>
                     </div>
                     <div class="tag-row">
                         <span class="pill"><?= h($modalTemple['deity_primary']) ?></span>
-                        <span class="pill"><?= h($modalTemple['deity_secondary']) ?></span>
-                        <span class="pill"><?= h($modalTemple['region_label']) ?></span>
+                        <span class="pill"><?= h((string) $modalTemple['deity_secondary']) ?></span>
+                        <span class="pill"><?= h((string) $modalTemple['region_label']) ?></span>
                     </div>
                 </div>
             </div>
@@ -543,9 +571,9 @@ function render_temples(): void
 
 function render_store(): void
 {
-    $selectedCategory = $_GET['category'] ?? '';
+    $selectedCategory = is_string($_GET['category'] ?? null) ? $_GET['category'] : '';
     $categories = store_categories();
-    $products = all_products(['category' => is_string($selectedCategory) ? $selectedCategory : '']);
+    $products = all_products(['category' => $selectedCategory]);
     ?>
     <section class="section-block compact-top">
         <span class="eyebrow">Shop</span>
@@ -557,20 +585,15 @@ function render_store(): void
             <?php endforeach; ?>
         </div>
 
-        <?php if (!current_user()): ?>
-            <div class="sign-in-banner">
-                <span>Sign in to add items to your cart and place orders</span>
-                <a class="btn btn-primary small-btn" href="<?= h(app_url('signin')) ?>">Sign In</a>
-            </div>
-        <?php endif; ?>
+        <div class="sign-in-banner">
+            <span>You can add items to cart even before checkout. After login, the top-right user menu gives direct access to profile, order status, and logout.</span>
+        </div>
 
         <div class="card-grid four-col">
             <?php foreach ($products as $product): ?>
                 <article class="card product-card">
-                    <div class="card-media <?= h(theme_class($product['image_theme'])) ?>">
-                        <span class="discount-badge">
-                            <?= h((string) round((1 - ((float) $product['price'] / max((float) $product['original_price'], 1))) * 100)) ?>% OFF
-                        </span>
+                    <div class="<?= h(media_classes('card-media', $product['image_theme'] ?? null, $product['image_url'] ?? null)) ?>"<?= media_style($product['image_url'] ?? null) ?>>
+                        <span class="discount-badge"><?= h((string) round((1 - ((float) $product['price'] / max((float) $product['original_price'], 1))) * 100)) ?>% OFF</span>
                     </div>
                     <div class="card-body">
                         <h3><?= h($product['name']) ?></h3>
@@ -583,8 +606,8 @@ function render_store(): void
                             <input type="hidden" name="_token" value="<?= h(csrf_token()) ?>">
                             <input type="hidden" name="action" value="add-to-cart">
                             <input type="hidden" name="product_id" value="<?= (int) $product['id'] ?>">
-                            <input type="hidden" name="redirect" value="<?= h(app_url('store' . ($selectedCategory ? '?category=' . urlencode((string) $selectedCategory) : ''))) ?>">
-                            <button class="icon-action" type="submit">Add to Cart</button>
+                            <input type="hidden" name="redirect" value="<?= h(app_url('store' . ($selectedCategory ? '?category=' . urlencode($selectedCategory) : ''))) ?>">
+                            <button class="btn btn-primary full-width" type="submit">Add to Cart</button>
                         </form>
                     </div>
                 </article>
@@ -612,7 +635,7 @@ function render_cart(): void
             <?php else: ?>
                 <?php foreach ($items as $item): ?>
                     <article class="cart-item">
-                        <div class="mini-media <?= h(theme_class($item['image_theme'])) ?>"></div>
+                        <div class="<?= h(media_classes('mini-media', $item['image_theme'] ?? null, $item['image_url'] ?? null)) ?>"<?= media_style($item['image_url'] ?? null) ?>></div>
                         <div class="cart-copy">
                             <h3><?= h($item['name']) ?></h3>
                             <strong><?= h(money($item['price'])) ?></strong>
@@ -676,8 +699,8 @@ function render_cart(): void
                         <input name="state" type="text" placeholder="State" value="<?= h($user['state'] ?? '') ?>" required>
                     </div>
                     <input name="pincode" type="text" placeholder="Pincode" value="<?= h($user['pincode'] ?? '') ?>" required>
-                    <button class="btn btn-primary full-width" type="submit">Proceed to Pay</button>
-                    <p class="payment-note">Orders are stored in MySQL and marked pending until a payment gateway is connected.</p>
+                    <button class="btn btn-primary full-width" type="submit">Proceed to Razorpay</button>
+                    <p class="payment-note">After you submit this form, the app creates a pending order in MySQL and opens Razorpay for secure payment.</p>
                 </form>
             </div>
         </aside>
@@ -687,16 +710,16 @@ function render_cart(): void
 
 function render_seva(): void
 {
-    $selectedPlace = $_GET['place'] ?? '';
-    $selectedSlug = $_GET['book'] ?? '';
+    $selectedPlace = is_string($_GET['place'] ?? null) ? $_GET['place'] : '';
+    $selectedSlug = is_string($_GET['book'] ?? null) ? $_GET['book'] : '';
     $places = seva_places();
-    $sevas = all_sevas(['place_group' => is_string($selectedPlace) ? $selectedPlace : '']);
-    $selectedSeva = is_string($selectedSlug) && $selectedSlug !== '' ? find_seva_by_slug($selectedSlug) : null;
+    $sevas = all_sevas(['place_group' => $selectedPlace]);
+    $selectedSeva = $selectedSlug !== '' ? find_seva_by_slug($selectedSlug) : null;
     ?>
     <section class="section-block compact-top">
         <span class="eyebrow">Devlokam Seva</span>
         <h1 class="page-title">Sacred Seva</h1>
-        <p class="page-subtitle centered-copy">Earn divine merit through sacred seva. Watch your seva being performed live via a shared video link after booking.</p>
+        <p class="page-subtitle centered-copy">Sponsor seva and complete payments securely via Razorpay. Image URLs for each seva can now be managed in phpMyAdmin.</p>
         <div class="center-actions">
             <a class="btn btn-outline" href="<?= h(app_url('seva-calendar')) ?>">View Seva Calendar</a>
         </div>
@@ -711,9 +734,9 @@ function render_seva(): void
         <div class="card-grid four-col">
             <?php foreach ($sevas as $seva): ?>
                 <article class="card seva-card">
-                    <div class="card-media <?= h(theme_class($seva['image_theme'])) ?>">
+                    <div class="<?= h(media_classes('card-media', $seva['image_theme'] ?? null, $seva['image_url'] ?? null)) ?>"<?= media_style($seva['image_url'] ?? null) ?>>
                         <span class="badge subtle-badge"><?= h($seva['place_group']) ?></span>
-                        <span class="discount-badge"><?= h($seva['badge_label']) ?></span>
+                        <span class="discount-badge"><?= h((string) $seva['badge_label']) ?></span>
                     </div>
                     <div class="card-body">
                         <h3><?= h($seva['name']) ?></h3>
@@ -766,7 +789,7 @@ function render_seva(): void
                         <span>Amount</span>
                         <strong><?= h(money($selectedSeva['price'])) ?></strong>
                     </div>
-                    <button class="btn btn-primary" type="submit">Pay <?= h(money($selectedSeva['price'])) ?></button>
+                    <button class="btn btn-primary" type="submit">Pay with Razorpay</button>
                 </form>
             </div>
         <?php endif; ?>
@@ -776,14 +799,14 @@ function render_seva(): void
 
 function render_calendar(): void
 {
-    $selectedPlace = $_GET['place'] ?? '';
+    $selectedPlace = is_string($_GET['place'] ?? null) ? $_GET['place'] : '';
     $places = seva_places();
-    $groups = grouped_calendar_events(['place_group' => is_string($selectedPlace) ? $selectedPlace : '']);
+    $groups = grouped_calendar_events(['place_group' => $selectedPlace]);
     ?>
     <section class="section-block compact-top">
         <span class="eyebrow">Upcoming</span>
         <h1 class="page-title">Seva Calendar</h1>
-        <p class="page-subtitle centered-copy">Plan your seva in advance. Book special sevas on auspicious dates at sacred places across Bharat.</p>
+        <p class="page-subtitle centered-copy">Plan your seva in advance. Each event links back to a bookable seva flow with server-side payment verification.</p>
         <div class="chip-row centered-row">
             <a class="<?= $selectedPlace === '' ? 'chip chip-active' : 'chip' ?>" href="<?= h(app_url('seva-calendar')) ?>">All Places</a>
             <?php foreach ($places as $place): ?>
@@ -817,7 +840,6 @@ function render_calendar(): void
 function render_profile(): void
 {
     $user = current_user();
-
     if (!$user) {
         ?>
         <section class="auth-shell">
@@ -834,7 +856,7 @@ function render_profile(): void
     <section class="profile-shell">
         <div class="profile-card">
             <div class="profile-head">
-                <div class="avatar-circle"><?= h(strtoupper(substr($user['full_name'], 0, 1))) ?></div>
+                <div class="avatar-circle"><?= h(strtoupper(substr((string) $user['full_name'], 0, 1))) ?></div>
                 <div>
                     <h1><?= h($user['full_name']) ?></h1>
                     <p><?= h($user['email']) ?></p>
@@ -852,7 +874,7 @@ function render_profile(): void
                     <input type="email" value="<?= h($user['email']) ?>" disabled>
                 </label>
                 <label>Mobile Number
-                    <input name="phone" type="text" value="<?= h($user['phone']) ?>">
+                    <input name="phone" type="text" value="<?= h((string) ($user['phone'] ?? '')) ?>">
                 </label>
                 <div class="triple-inputs">
                     <label>Age
@@ -888,6 +910,167 @@ function render_profile(): void
             </form>
         </div>
     </section>
+    <?php
+}
+
+function render_order_status(): void
+{
+    $user = current_user();
+    if (!$user) {
+        ?>
+        <section class="auth-shell">
+            <div class="auth-card">
+                <h1 class="page-title left-title">Order Status</h1>
+                <p>Please sign in to view your orders and booking statuses.</p>
+                <a class="btn btn-primary" href="<?= h(app_url('signin')) ?>">Sign In</a>
+            </div>
+        </section>
+        <?php
+        return;
+    }
+
+    $orders = user_orders();
+    $pujaBookings = user_puja_bookings();
+    $sevaBookings = user_seva_bookings();
+    ?>
+    <section class="section-block compact-top">
+        <span class="eyebrow">Tracking</span>
+        <h1 class="page-title left-title">Order Status</h1>
+
+        <div class="status-grid">
+            <div class="booking-panel">
+                <h2>Store Orders</h2>
+                <?php if ($orders === []): ?>
+                    <p class="muted-text">No store orders yet.</p>
+                <?php else: ?>
+                    <?php foreach ($orders as $order): ?>
+                        <div class="status-card">
+                            <strong>Order #<?= (int) $order['id'] ?></strong>
+                            <span><?= h(money($order['total_amount'])) ?></span>
+                            <small>Status: <?= h($order['status']) ?> | Payment: <?= h($order['payment_status']) ?></small>
+                            <?php if (!empty($order['razorpay_payment_id'])): ?>
+                                <small>Razorpay Payment ID: <?= h($order['razorpay_payment_id']) ?></small>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+
+            <div class="booking-panel">
+                <h2>Puja Bookings</h2>
+                <?php if ($pujaBookings === []): ?>
+                    <p class="muted-text">No puja bookings yet.</p>
+                <?php else: ?>
+                    <?php foreach ($pujaBookings as $booking): ?>
+                        <div class="status-card">
+                            <strong><?= h((string) $booking['puja_name']) ?></strong>
+                            <span><?= h(money($booking['amount'])) ?></span>
+                            <small>Status: <?= h($booking['status']) ?> | Payment: <?= h($booking['payment_status']) ?></small>
+                            <?php if (!empty($booking['preferred_date'])): ?>
+                                <small>Date: <?= h((string) $booking['preferred_date']) ?></small>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+
+            <div class="booking-panel">
+                <h2>Seva Bookings</h2>
+                <?php if ($sevaBookings === []): ?>
+                    <p class="muted-text">No seva bookings yet.</p>
+                <?php else: ?>
+                    <?php foreach ($sevaBookings as $booking): ?>
+                        <div class="status-card">
+                            <strong><?= h((string) $booking['seva_name']) ?></strong>
+                            <span><?= h(money($booking['amount'])) ?></span>
+                            <small>Status: <?= h($booking['status']) ?> | Payment: <?= h($booking['payment_status']) ?></small>
+                            <?php if (!empty($booking['preferred_date'])): ?>
+                                <small>Date: <?= h((string) $booking['preferred_date']) ?></small>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+        </div>
+    </section>
+    <?php
+}
+
+function render_payment_page(): void
+{
+    $type = is_string($_GET['type'] ?? null) ? $_GET['type'] : '';
+    $localId = (int) ($_GET['id'] ?? 0);
+    $record = payment_record($type, $localId);
+
+    if (!$record || empty($record['razorpay_order_id'])) {
+        render_not_found();
+        return;
+    }
+
+    $name = payment_record_name($type, $localId);
+    $prefillName = $record['full_name'] ?? user_prefill('full_name');
+    $prefillEmail = $record['email'] ?? user_prefill('email');
+    $prefillPhone = $record['phone'] ?? user_prefill('phone');
+    $options = [
+        'key' => app_config('razorpay_key_id', ''),
+        'amount' => amount_in_paise($record['amount'] ?? $record['total_amount'] ?? 0),
+        'currency' => 'INR',
+        'name' => 'DevLokam',
+        'description' => $name,
+        'image' => app_absolute_url('assets/logo.png'),
+        'order_id' => $record['razorpay_order_id'],
+        'prefill' => [
+            'name' => $prefillName,
+            'email' => $prefillEmail,
+            'contact' => $prefillPhone,
+        ],
+        'theme' => ['color' => '#d3672d'],
+    ];
+    ?>
+    <section class="auth-shell">
+        <div class="auth-card payment-card">
+            <span class="eyebrow">Secure Payment</span>
+            <h1 class="page-title left-title">Complete Payment</h1>
+            <p>We have created your pending <?= h($type) ?> record in MySQL. Click below to open Razorpay and complete the payment.</p>
+            <div class="status-card">
+                <strong><?= h($name) ?></strong>
+                <span><?= h(money($record['amount'] ?? $record['total_amount'] ?? 0)) ?></span>
+                <small>Razorpay Order ID: <?= h((string) $record['razorpay_order_id']) ?></small>
+            </div>
+            <button id="rzp-pay-button" class="btn btn-primary full-width" type="button">Pay with Razorpay</button>
+            <a class="btn btn-outline full-width" href="<?= h(app_url('order-status')) ?>">Go to Order Status</a>
+
+            <form id="razorpay-verify-form" method="post" action="<?= h(app_url()) ?>" class="hidden-form">
+                <input type="hidden" name="_token" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="action" value="verify-razorpay">
+                <input type="hidden" name="redirect" value="<?= h(app_url('payment?type=' . urlencode($type) . '&id=' . $localId)) ?>">
+                <input type="hidden" name="payment_type" value="<?= h($type) ?>">
+                <input type="hidden" name="local_id" value="<?= (int) $localId ?>">
+                <input type="hidden" name="razorpay_payment_id" id="rzp_payment_id">
+                <input type="hidden" name="razorpay_order_id" id="rzp_order_id">
+                <input type="hidden" name="razorpay_signature" id="rzp_signature">
+            </form>
+        </div>
+    </section>
+
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <script>
+    (function () {
+        var options = <?= json_encode($options, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+        options.handler = function (response) {
+            document.getElementById('rzp_payment_id').value = response.razorpay_payment_id || '';
+            document.getElementById('rzp_order_id').value = response.razorpay_order_id || '';
+            document.getElementById('rzp_signature').value = response.razorpay_signature || '';
+            document.getElementById('razorpay-verify-form').submit();
+        };
+
+        var razorpay = new Razorpay(options);
+        document.getElementById('rzp-pay-button').addEventListener('click', function (event) {
+            razorpay.open();
+            event.preventDefault();
+        });
+    }());
+    </script>
     <?php
 }
 

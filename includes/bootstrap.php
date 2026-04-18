@@ -42,6 +42,22 @@ function app_url(string $path = ''): string
     return $prefix . '/' . $path;
 }
 
+function app_absolute_url(string $path = ''): string
+{
+    $domain = rtrim((string) app_config('app_domain', ''), '/');
+    $relative = app_url($path);
+
+    if ($domain === '') {
+        return $relative;
+    }
+
+    if ($relative === '/') {
+        return $domain . '/';
+    }
+
+    return $domain . $relative;
+}
+
 function request_path(): string
 {
     $uriPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
@@ -76,6 +92,8 @@ function app_route(): array
         'services', 'seva' => ['page' => 'seva', 'slug' => null, 'status' => 200],
         'seva-calendar' => ['page' => 'calendar', 'slug' => null, 'status' => 200],
         'profile' => ['page' => 'profile', 'slug' => null, 'status' => 200],
+        'order-status' => ['page' => 'order-status', 'slug' => null, 'status' => 200],
+        'payment' => ['page' => 'payment', 'slug' => null, 'status' => 200],
         'signin' => ['page' => 'signin', 'slug' => null, 'status' => 200],
         default => ['page' => 'not-found', 'slug' => null, 'status' => 404],
     };
@@ -84,13 +102,6 @@ function app_route(): array
 function h(?string $value): string
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
-}
-
-function slugify(string $value): string
-{
-    $value = strtolower(trim($value));
-    $value = preg_replace('/[^a-z0-9]+/', '-', $value) ?? $value;
-    return trim($value, '-');
 }
 
 function money(float|int|string $value): string
@@ -130,7 +141,7 @@ function verify_csrf(): void
 
     if (!is_string($token) || !is_string($sessionToken) || !hash_equals($sessionToken, $token)) {
         flash('error', 'Your session token expired. Please try again.');
-        redirect($_POST['redirect'] ?? app_url());
+        redirect(is_string($_POST['redirect'] ?? null) ? $_POST['redirect'] : app_url());
     }
 }
 
@@ -178,7 +189,7 @@ function db(): ?PDO
 
 function db_notice(): ?string
 {
-    return db() === null ? 'Database is not connected yet. Import database.sql in phpMyAdmin and update config.php for live data.' : null;
+    return db() === null ? 'Database is not connected yet. Import database.sql or database_upgrade.sql in phpMyAdmin and verify config.php.' : null;
 }
 
 function fetch_all(string $sql, array $params = []): array
@@ -249,6 +260,20 @@ function sign_out_user(): void
     unset($_SESSION['user_id']);
 }
 
+function post_value(string $key, string $default = ''): string
+{
+    $value = $_POST[$key] ?? $default;
+    return is_string($value) ? trim($value) : $default;
+}
+
+function require_login(): void
+{
+    if (!current_user()) {
+        flash('error', 'Please sign in first.');
+        redirect(app_url('signin'));
+    }
+}
+
 function cart_map(): array
 {
     if (!isset($_SESSION['cart']) || !is_array($_SESSION['cart'])) {
@@ -276,7 +301,10 @@ function cart_items(): array
     }
 
     $placeholders = implode(',', array_fill(0, count($cart), '?'));
-    $products = fetch_all("SELECT p.*, c.name AS category_name FROM products p LEFT JOIN product_categories c ON c.id = p.category_id WHERE p.id IN ({$placeholders}) ORDER BY p.name", array_keys($cart));
+    $products = fetch_all(
+        "SELECT p.*, c.name AS category_name FROM products p LEFT JOIN product_categories c ON c.id = p.category_id WHERE p.id IN ({$placeholders}) ORDER BY p.name",
+        array_keys($cart)
+    );
 
     foreach ($products as &$product) {
         $quantity = max(1, (int) ($cart[$product['id']] ?? 1));
@@ -314,7 +342,6 @@ function all_temples(array $filters = []): array
     }
 
     $sql .= ' ORDER BY name';
-
     return fetch_all($sql, $params);
 }
 
@@ -349,7 +376,6 @@ function all_pujas(array $filters = []): array
     }
 
     $sql .= ' ORDER BY p.is_featured DESC, p.price ASC';
-
     return fetch_all($sql, $params);
 }
 
@@ -401,13 +427,12 @@ function all_products(array $filters = []): array
     }
 
     $sql .= ' ORDER BY p.id';
-
     return fetch_all($sql, $params);
 }
 
 function find_product(int $productId): ?array
 {
-    return fetch_one('SELECT * FROM products WHERE id = :id LIMIT 1', ['id' => $productId]);
+    return fetch_one('SELECT p.*, c.name AS category_name FROM products p LEFT JOIN product_categories c ON c.id = p.category_id WHERE p.id = :id LIMIT 1', ['id' => $productId]);
 }
 
 function all_sevas(array $filters = []): array
@@ -421,7 +446,6 @@ function all_sevas(array $filters = []): array
     }
 
     $sql .= ' ORDER BY price ASC';
-
     return fetch_all($sql, $params);
 }
 
@@ -446,14 +470,12 @@ function seva_calendar_events(array $filters = []): array
     }
 
     $sql .= ' ORDER BY e.event_date ASC';
-
     return fetch_all($sql, $params);
 }
 
 function grouped_calendar_events(array $filters = []): array
 {
     $groups = [];
-
     foreach (seva_calendar_events($filters) as $event) {
         $label = date('F Y', strtotime((string) $event['event_date']));
         $groups[$label][] = $event;
@@ -462,18 +484,367 @@ function grouped_calendar_events(array $filters = []): array
     return $groups;
 }
 
-function require_login_for_profile(): void
+function user_orders(): array
 {
-    if (!current_user()) {
-        flash('error', 'Please sign in first.');
-        redirect(app_url('signin'));
+    $user = current_user();
+    if (!$user) {
+        return [];
+    }
+
+    return fetch_all('SELECT * FROM orders WHERE user_id = :user_id ORDER BY id DESC', ['user_id' => $user['id']]);
+}
+
+function user_puja_bookings(): array
+{
+    $user = current_user();
+    if (!$user) {
+        return [];
+    }
+
+    return fetch_all(
+        'SELECT pb.*, p.name AS puja_name FROM puja_bookings pb LEFT JOIN pujas p ON p.id = pb.puja_id WHERE pb.user_id = :user_id ORDER BY pb.id DESC',
+        ['user_id' => $user['id']]
+    );
+}
+
+function user_seva_bookings(): array
+{
+    $user = current_user();
+    if (!$user) {
+        return [];
+    }
+
+    return fetch_all(
+        'SELECT sb.*, s.name AS seva_name FROM seva_bookings sb LEFT JOIN sevas s ON s.id = sb.seva_id WHERE sb.user_id = :user_id ORDER BY sb.id DESC',
+        ['user_id' => $user['id']]
+    );
+}
+
+function is_razorpay_ready(): bool
+{
+    return (string) app_config('razorpay_key_id', '') !== '' && (string) app_config('razorpay_key_secret', '') !== '';
+}
+
+function gateway_label(): string
+{
+    return 'Razorpay';
+}
+
+function receipt_code(string $prefix, int $id): string
+{
+    return strtoupper($prefix) . '-' . date('Ymd') . '-' . str_pad((string) $id, 6, '0', STR_PAD_LEFT);
+}
+
+function amount_in_paise(float|int|string $amount): int
+{
+    return (int) round((float) $amount * 100);
+}
+
+function razorpay_headers(string $keyId, string $keySecret): array
+{
+    return [
+        'Authorization: Basic ' . base64_encode($keyId . ':' . $keySecret),
+        'Content-Type: application/json',
+    ];
+}
+
+function razorpay_create_order(int $amountPaise, string $receipt, array $notes = []): array
+{
+    $keyId = (string) app_config('razorpay_key_id', '');
+    $keySecret = (string) app_config('razorpay_key_secret', '');
+
+    if ($keyId === '' || $keySecret === '') {
+        throw new RuntimeException('Razorpay credentials are missing.');
+    }
+
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('PHP cURL extension is required for Razorpay.');
+    }
+
+    $payload = json_encode([
+        'amount' => $amountPaise,
+        'currency' => 'INR',
+        'receipt' => $receipt,
+        'notes' => $notes,
+    ], JSON_THROW_ON_ERROR);
+
+    $curl = curl_init('https://api.razorpay.com/v1/orders');
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $payload,
+        CURLOPT_HTTPHEADER => razorpay_headers($keyId, $keySecret),
+        CURLOPT_TIMEOUT => 30,
+    ]);
+
+    $response = curl_exec($curl);
+    $httpCode = (int) curl_getinfo($curl, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($curl);
+    curl_close($curl);
+
+    if ($response === false || $curlError !== '') {
+        throw new RuntimeException('Unable to reach Razorpay: ' . $curlError);
+    }
+
+    $decoded = json_decode($response, true);
+    if ($httpCode >= 400 || !is_array($decoded) || empty($decoded['id'])) {
+        $errorMessage = is_array($decoded) && isset($decoded['error']['description']) ? $decoded['error']['description'] : 'Razorpay order creation failed.';
+        throw new RuntimeException($errorMessage);
+    }
+
+    return $decoded;
+}
+
+function razorpay_signature_is_valid(string $orderId, string $paymentId, string $signature): bool
+{
+    $secret = (string) app_config('razorpay_key_secret', '');
+    if ($secret === '') {
+        return false;
+    }
+
+    $generated = hash_hmac('sha256', $orderId . '|' . $paymentId, $secret);
+    return hash_equals($generated, $signature);
+}
+
+function payment_record(string $type, int $localId): ?array
+{
+    return match ($type) {
+        'order' => fetch_one('SELECT * FROM orders WHERE id = :id LIMIT 1', ['id' => $localId]),
+        'puja' => fetch_one('SELECT * FROM puja_bookings WHERE id = :id LIMIT 1', ['id' => $localId]),
+        'seva' => fetch_one('SELECT * FROM seva_bookings WHERE id = :id LIMIT 1', ['id' => $localId]),
+        default => null,
+    };
+}
+
+function payment_record_name(string $type, int $localId): string
+{
+    return match ($type) {
+        'order' => 'Store Order #' . $localId,
+        'puja' => (string) (fetch_one('SELECT p.name FROM puja_bookings pb LEFT JOIN pujas p ON p.id = pb.puja_id WHERE pb.id = :id LIMIT 1', ['id' => $localId])['name'] ?? ('Puja Booking #' . $localId)),
+        'seva' => (string) (fetch_one('SELECT s.name FROM seva_bookings sb LEFT JOIN sevas s ON s.id = sb.seva_id WHERE sb.id = :id LIMIT 1', ['id' => $localId])['name'] ?? ('Seva Booking #' . $localId)),
+        default => 'Payment',
+    };
+}
+
+function update_gateway_meta(string $type, int $localId, array $gatewayOrder, string $receiptCode): void
+{
+    $sql = match ($type) {
+        'order' => 'UPDATE orders SET gateway = :gateway, receipt_code = :receipt_code, razorpay_order_id = :razorpay_order_id, gateway_payload = :gateway_payload, updated_at = NOW() WHERE id = :id',
+        'puja' => 'UPDATE puja_bookings SET gateway = :gateway, receipt_code = :receipt_code, razorpay_order_id = :razorpay_order_id, gateway_payload = :gateway_payload, updated_at = NOW() WHERE id = :id',
+        'seva' => 'UPDATE seva_bookings SET gateway = :gateway, receipt_code = :receipt_code, razorpay_order_id = :razorpay_order_id, gateway_payload = :gateway_payload, updated_at = NOW() WHERE id = :id',
+        default => '',
+    };
+
+    if ($sql === '') {
+        return;
+    }
+
+    execute_query($sql, [
+        'gateway' => 'razorpay',
+        'receipt_code' => $receiptCode,
+        'razorpay_order_id' => $gatewayOrder['id'],
+        'gateway_payload' => json_encode($gatewayOrder),
+        'id' => $localId,
+    ]);
+}
+
+function mark_payment_verified(string $type, int $localId, string $paymentId, string $orderId, string $signature): bool
+{
+    $sql = match ($type) {
+        'order' => 'UPDATE orders SET payment_status = :payment_status, status = :status, razorpay_payment_id = :payment_id, razorpay_order_id = :order_id, razorpay_signature = :signature, updated_at = NOW() WHERE id = :id',
+        'puja' => 'UPDATE puja_bookings SET payment_status = :payment_status, status = :status, razorpay_payment_id = :payment_id, razorpay_order_id = :order_id, razorpay_signature = :signature, updated_at = NOW() WHERE id = :id',
+        'seva' => 'UPDATE seva_bookings SET payment_status = :payment_status, status = :status, razorpay_payment_id = :payment_id, razorpay_order_id = :order_id, razorpay_signature = :signature, updated_at = NOW() WHERE id = :id',
+        default => '',
+    };
+
+    if ($sql === '') {
+        return false;
+    }
+
+    $status = $type === 'order' ? 'processing' : 'booked';
+
+    return execute_query($sql, [
+        'payment_status' => 'paid',
+        'status' => $status,
+        'payment_id' => $paymentId,
+        'order_id' => $orderId,
+        'signature' => $signature,
+        'id' => $localId,
+    ]);
+}
+
+function mark_payment_by_gateway_order(string $gatewayOrderId, string $paymentId = '', string $signature = ''): void
+{
+    foreach (['orders' => 'processing', 'puja_bookings' => 'booked', 'seva_bookings' => 'booked'] as $table => $status) {
+        execute_query(
+            "UPDATE {$table} SET payment_status = 'paid', status = :status, razorpay_payment_id = COALESCE(NULLIF(:payment_id, ''), razorpay_payment_id), razorpay_signature = COALESCE(NULLIF(:signature, ''), razorpay_signature), updated_at = NOW() WHERE razorpay_order_id = :order_id",
+            [
+                'status' => $status,
+                'payment_id' => $paymentId,
+                'signature' => $signature,
+                'order_id' => $gatewayOrderId,
+            ]
+        );
     }
 }
 
-function post_value(string $key, string $default = ''): string
+function verify_razorpay_webhook_signature(string $payload, string $signature): bool
 {
-    $value = $_POST[$key] ?? $default;
-    return is_string($value) ? trim($value) : $default;
+    $secret = (string) app_config('razorpay_webhook_secret', '');
+    if ($secret === '' || $signature === '') {
+        return false;
+    }
+
+    $generated = hash_hmac('sha256', $payload, $secret);
+    return hash_equals($generated, $signature);
+}
+
+function handle_razorpay_webhook_request(): void
+{
+    if (request_path() !== '/razorpay-webhook' || ($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+        return;
+    }
+
+    $payload = file_get_contents('php://input') ?: '';
+    $signature = $_SERVER['HTTP_X_RAZORPAY_SIGNATURE'] ?? '';
+
+    if (!verify_razorpay_webhook_signature($payload, is_string($signature) ? $signature : '')) {
+        http_response_code(400);
+        echo 'Invalid webhook signature';
+        exit;
+    }
+
+    $decoded = json_decode($payload, true);
+    if (!is_array($decoded)) {
+        http_response_code(400);
+        echo 'Invalid payload';
+        exit;
+    }
+
+    $event = (string) ($decoded['event'] ?? '');
+    if (in_array($event, ['payment.captured', 'order.paid'], true)) {
+        $paymentEntity = $decoded['payload']['payment']['entity'] ?? [];
+        $orderEntity = $decoded['payload']['order']['entity'] ?? [];
+        $gatewayOrderId = (string) ($paymentEntity['order_id'] ?? $orderEntity['id'] ?? '');
+        $paymentId = (string) ($paymentEntity['id'] ?? '');
+
+        if ($gatewayOrderId !== '') {
+            mark_payment_by_gateway_order($gatewayOrderId, $paymentId, $signature);
+        }
+    }
+
+    http_response_code(200);
+    echo 'OK';
+    exit;
+}
+
+function create_order_and_items(array $payload): int
+{
+    $pdo = db();
+    if ($pdo === null) {
+        throw new RuntimeException('MySQL is not connected.');
+    }
+
+    $items = cart_items();
+    if ($items === []) {
+        throw new RuntimeException('Your cart is empty.');
+    }
+
+    $pdo->beginTransaction();
+
+    try {
+        $statement = $pdo->prepare(
+            'INSERT INTO orders (user_id, full_name, email, phone, address_line, city, state, pincode, total_amount, status, payment_status, gateway, created_at, updated_at)
+            VALUES (:user_id, :full_name, :email, :phone, :address_line, :city, :state, :pincode, :total_amount, :status, :payment_status, :gateway, NOW(), NOW())'
+        );
+
+        $statement->execute([
+            'user_id' => current_user()['id'] ?? null,
+            'full_name' => $payload['full_name'],
+            'email' => $payload['email'],
+            'phone' => $payload['phone'],
+            'address_line' => $payload['address_line'],
+            'city' => $payload['city'],
+            'state' => $payload['state'],
+            'pincode' => $payload['pincode'],
+            'total_amount' => cart_total(),
+            'status' => 'received',
+            'payment_status' => 'pending',
+            'gateway' => 'razorpay',
+        ]);
+
+        $orderId = (int) $pdo->lastInsertId();
+
+        $itemStatement = $pdo->prepare(
+            'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, line_total)
+            VALUES (:order_id, :product_id, :product_name, :quantity, :unit_price, :line_total)'
+        );
+
+        foreach ($items as $item) {
+            $itemStatement->execute([
+                'order_id' => $orderId,
+                'product_id' => $item['id'],
+                'product_name' => $item['name'],
+                'quantity' => $item['cart_quantity'],
+                'unit_price' => $item['price'],
+                'line_total' => $item['line_total'],
+            ]);
+        }
+
+        $pdo->commit();
+        return $orderId;
+    } catch (Throwable $exception) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+
+        throw $exception;
+    }
+}
+
+function create_puja_booking(array $payload): int
+{
+    $saved = execute_query(
+        'INSERT INTO puja_bookings (user_id, puja_id, full_name, email, phone, gotra, preferred_date, occasion, address_line, city, state, pincode, amount, status, payment_status, gateway, created_at, updated_at)
+        VALUES (:user_id, :puja_id, :full_name, :email, :phone, :gotra, :preferred_date, :occasion, :address_line, :city, :state, :pincode, :amount, :status, :payment_status, :gateway, NOW(), NOW())',
+        $payload
+    );
+
+    if (!$saved) {
+        throw new RuntimeException('Unable to save puja booking.');
+    }
+
+    $booking = fetch_one('SELECT id FROM puja_bookings ORDER BY id DESC LIMIT 1');
+    return (int) ($booking['id'] ?? 0);
+}
+
+function create_seva_booking(array $payload): int
+{
+    $saved = execute_query(
+        'INSERT INTO seva_bookings (user_id, seva_id, full_name, email, phone, booking_for, preferred_date, occasion, address_line, city, state, pincode, amount, status, payment_status, gateway, created_at, updated_at)
+        VALUES (:user_id, :seva_id, :full_name, :email, :phone, :booking_for, :preferred_date, :occasion, :address_line, :city, :state, :pincode, :amount, :status, :payment_status, :gateway, NOW(), NOW())',
+        $payload
+    );
+
+    if (!$saved) {
+        throw new RuntimeException('Unable to save seva booking.');
+    }
+
+    $booking = fetch_one('SELECT id FROM seva_bookings ORDER BY id DESC LIMIT 1');
+    return (int) ($booking['id'] ?? 0);
+}
+
+function start_payment_redirect(string $type, int $localId, float $amount, string $name): never
+{
+    $receipt = receipt_code($type, $localId);
+    $gatewayOrder = razorpay_create_order(amount_in_paise($amount), $receipt, [
+        'local_type' => $type,
+        'local_id' => (string) $localId,
+        'item_name' => $name,
+    ]);
+
+    update_gateway_meta($type, $localId, $gatewayOrder, $receipt);
+    redirect(app_url('payment?type=' . urlencode($type) . '&id=' . $localId));
 }
 
 function handle_actions(): void
@@ -526,7 +897,7 @@ function handle_actions(): void
             );
 
             if (!$created) {
-                flash('error', 'Database is not connected yet. Please import database.sql first.');
+                flash('error', 'Unable to create account. Please verify the database connection.');
                 redirect($redirectTarget);
             }
 
@@ -546,6 +917,7 @@ function handle_actions(): void
         case 'add-to-cart':
             $productId = (int) ($_POST['product_id'] ?? 0);
             $product = find_product($productId);
+
             if (!$product) {
                 flash('error', 'Product not found.');
                 redirect($redirectTarget);
@@ -561,6 +933,7 @@ function handle_actions(): void
             $productId = (int) ($_POST['product_id'] ?? 0);
             $mode = post_value('mode');
             $cart = cart_map();
+
             if (!isset($cart[$productId])) {
                 redirect($redirectTarget);
             }
@@ -581,41 +954,24 @@ function handle_actions(): void
             redirect($redirectTarget);
 
         case 'checkout':
-            $items = cart_items();
-            if ($items === []) {
-                flash('error', 'Your cart is empty.');
-                redirect($redirectTarget);
-            }
-
-            $pdo = db();
-            if ($pdo === null) {
-                flash('error', 'Please connect MySQL before placing orders.');
-                redirect($redirectTarget);
-            }
-
-            $fullName = post_value('full_name');
-            $email = post_value('email');
-            $phone = post_value('phone');
-            $addressLine = post_value('address_line');
-            $city = post_value('city');
-            $state = post_value('state');
-            $pincode = post_value('pincode');
-
-            if ($fullName === '' || $email === '' || $phone === '' || $addressLine === '' || $city === '' || $state === '' || $pincode === '') {
-                flash('error', 'Please complete the delivery form.');
-                redirect($redirectTarget);
-            }
-
             try {
-                $pdo->beginTransaction();
+                $fullName = post_value('full_name');
+                $email = post_value('email');
+                $phone = post_value('phone');
+                $addressLine = post_value('address_line');
+                $city = post_value('city');
+                $state = post_value('state');
+                $pincode = post_value('pincode');
 
-                $statement = $pdo->prepare(
-                    'INSERT INTO orders (user_id, full_name, email, phone, address_line, city, state, pincode, total_amount, status, payment_status, created_at)
-                    VALUES (:user_id, :full_name, :email, :phone, :address_line, :city, :state, :pincode, :total_amount, :status, :payment_status, NOW())'
-                );
+                if ($fullName === '' || $email === '' || $phone === '' || $addressLine === '' || $city === '' || $state === '' || $pincode === '') {
+                    throw new RuntimeException('Please complete the delivery form.');
+                }
 
-                $statement->execute([
-                    'user_id' => current_user()['id'] ?? null,
+                if (!is_razorpay_ready()) {
+                    throw new RuntimeException('Razorpay keys are missing in config.php.');
+                }
+
+                $orderId = create_order_and_items([
                     'full_name' => $fullName,
                     'email' => $email,
                     'phone' => $phone,
@@ -623,54 +979,28 @@ function handle_actions(): void
                     'city' => $city,
                     'state' => $state,
                     'pincode' => $pincode,
-                    'total_amount' => cart_total(),
-                    'status' => 'received',
-                    'payment_status' => 'pending',
                 ]);
 
-                $orderId = (int) $pdo->lastInsertId();
-
-                $itemStatement = $pdo->prepare(
-                    'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, line_total)
-                    VALUES (:order_id, :product_id, :product_name, :quantity, :unit_price, :line_total)'
-                );
-
-                foreach ($items as $item) {
-                    $itemStatement->execute([
-                        'order_id' => $orderId,
-                        'product_id' => $item['id'],
-                        'product_name' => $item['name'],
-                        'quantity' => $item['cart_quantity'],
-                        'unit_price' => $item['price'],
-                        'line_total' => $item['line_total'],
-                    ]);
-                }
-
-                $pdo->commit();
-                set_cart_map([]);
-                flash('success', 'Order placed successfully. Payment status is pending until your gateway is connected.');
+                start_payment_redirect('order', $orderId, cart_total(), 'Divine Store Order');
             } catch (Throwable $exception) {
-                if ($pdo->inTransaction()) {
-                    $pdo->rollBack();
-                }
-
-                flash('error', 'Order could not be placed. Please try again.');
-            }
-
-            redirect(app_url('cart'));
-
-        case 'book-puja':
-            $pujaId = (int) ($_POST['puja_id'] ?? 0);
-            $puja = fetch_one('SELECT * FROM pujas WHERE id = :id LIMIT 1', ['id' => $pujaId]);
-            if (!$puja) {
-                flash('error', 'Puja not found.');
+                flash('error', $exception->getMessage());
                 redirect($redirectTarget);
             }
 
-            $saved = execute_query(
-                'INSERT INTO puja_bookings (user_id, puja_id, full_name, email, phone, gotra, preferred_date, occasion, address_line, city, state, pincode, amount, status, payment_status, created_at)
-                VALUES (:user_id, :puja_id, :full_name, :email, :phone, :gotra, :preferred_date, :occasion, :address_line, :city, :state, :pincode, :amount, :status, :payment_status, NOW())',
-                [
+        case 'book-puja':
+            try {
+                $pujaId = (int) ($_POST['puja_id'] ?? 0);
+                $puja = fetch_one('SELECT * FROM pujas WHERE id = :id LIMIT 1', ['id' => $pujaId]);
+
+                if (!$puja) {
+                    throw new RuntimeException('Puja not found.');
+                }
+
+                if (!is_razorpay_ready()) {
+                    throw new RuntimeException('Razorpay keys are missing in config.php.');
+                }
+
+                $bookingId = create_puja_booking([
                     'user_id' => current_user()['id'] ?? null,
                     'puja_id' => $pujaId,
                     'full_name' => post_value('full_name'),
@@ -686,24 +1016,29 @@ function handle_actions(): void
                     'amount' => $puja['price'],
                     'status' => 'received',
                     'payment_status' => 'pending',
-                ]
-            );
+                    'gateway' => 'razorpay',
+                ]);
 
-            flash($saved ? 'success' : 'error', $saved ? 'Puja booking captured successfully.' : 'Please connect MySQL before taking live puja bookings.');
-            redirect($redirectTarget);
-
-        case 'book-seva':
-            $sevaId = (int) ($_POST['seva_id'] ?? 0);
-            $seva = fetch_one('SELECT * FROM sevas WHERE id = :id LIMIT 1', ['id' => $sevaId]);
-            if (!$seva) {
-                flash('error', 'Seva not found.');
+                start_payment_redirect('puja', $bookingId, (float) $puja['price'], (string) $puja['name']);
+            } catch (Throwable $exception) {
+                flash('error', $exception->getMessage());
                 redirect($redirectTarget);
             }
 
-            $saved = execute_query(
-                'INSERT INTO seva_bookings (user_id, seva_id, full_name, email, phone, booking_for, preferred_date, occasion, address_line, city, state, pincode, amount, status, payment_status, created_at)
-                VALUES (:user_id, :seva_id, :full_name, :email, :phone, :booking_for, :preferred_date, :occasion, :address_line, :city, :state, :pincode, :amount, :status, :payment_status, NOW())',
-                [
+        case 'book-seva':
+            try {
+                $sevaId = (int) ($_POST['seva_id'] ?? 0);
+                $seva = fetch_one('SELECT * FROM sevas WHERE id = :id LIMIT 1', ['id' => $sevaId]);
+
+                if (!$seva) {
+                    throw new RuntimeException('Seva not found.');
+                }
+
+                if (!is_razorpay_ready()) {
+                    throw new RuntimeException('Razorpay keys are missing in config.php.');
+                }
+
+                $bookingId = create_seva_booking([
                     'user_id' => current_user()['id'] ?? null,
                     'seva_id' => $sevaId,
                     'full_name' => post_value('full_name'),
@@ -719,14 +1054,17 @@ function handle_actions(): void
                     'amount' => $seva['price'],
                     'status' => 'received',
                     'payment_status' => 'pending',
-                ]
-            );
+                    'gateway' => 'razorpay',
+                ]);
 
-            flash($saved ? 'success' : 'error', $saved ? 'Seva booking captured successfully.' : 'Please connect MySQL before taking live seva bookings.');
-            redirect($redirectTarget);
+                start_payment_redirect('seva', $bookingId, (float) $seva['price'], (string) $seva['name']);
+            } catch (Throwable $exception) {
+                flash('error', $exception->getMessage());
+                redirect($redirectTarget);
+            }
 
         case 'save-profile':
-            require_login_for_profile();
+            require_login();
             $saved = execute_query(
                 'UPDATE users SET full_name = :full_name, phone = :phone, age = :age, gender = :gender, gotra = :gotra, address_line = :address_line, city = :city, state = :state, pincode = :pincode WHERE id = :id',
                 [
@@ -746,9 +1084,42 @@ function handle_actions(): void
             flash($saved ? 'success' : 'error', $saved ? 'Profile updated.' : 'Profile could not be updated.');
             redirect(app_url('profile'));
 
+        case 'verify-razorpay':
+            $type = post_value('payment_type');
+            $localId = (int) ($_POST['local_id'] ?? 0);
+            $razorpayPaymentId = post_value('razorpay_payment_id');
+            $razorpayOrderId = post_value('razorpay_order_id');
+            $razorpaySignature = post_value('razorpay_signature');
+
+            $record = payment_record($type, $localId);
+            if (!$record) {
+                flash('error', 'Unable to verify payment record.');
+                redirect(app_url('order-status'));
+            }
+
+            if ((string) ($record['razorpay_order_id'] ?? '') !== $razorpayOrderId) {
+                flash('error', 'Payment order mismatch detected.');
+                redirect(app_url('order-status'));
+            }
+
+            if (!razorpay_signature_is_valid($razorpayOrderId, $razorpayPaymentId, $razorpaySignature)) {
+                flash('error', 'Payment signature verification failed.');
+                redirect(app_url('payment?type=' . urlencode($type) . '&id=' . $localId));
+            }
+
+            $saved = mark_payment_verified($type, $localId, $razorpayPaymentId, $razorpayOrderId, $razorpaySignature);
+
+            if ($saved && $type === 'order') {
+                set_cart_map([]);
+            }
+
+            flash($saved ? 'success' : 'error', $saved ? 'Payment verified successfully.' : 'Payment could not be updated.');
+            redirect(app_url('order-status'));
+
         default:
             redirect($redirectTarget);
     }
 }
 
+handle_razorpay_webhook_request();
 handle_actions();
